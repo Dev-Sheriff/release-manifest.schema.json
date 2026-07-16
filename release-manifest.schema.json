@@ -1,0 +1,787 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://internal.corp.com/schemas/release-manifest.v2.json",
+  "title": "Software Release Manifest",
+  "description": "Comprehensive deployment specification for microservices with canary, blue/green, and rollback strategies",
+  "type": "object",
+  
+  "definitions": {
+    "semver": {
+      "type": "string",
+      "pattern": "^v?(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-((?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\\+([0-9a-zA-Z-]+(?:\\.[0-9a-zA-Z-]+)*))?$",
+      "examples": ["v1.2.3", "2.0.0-rc.1+build.42"]
+    },
+    
+    "resource_limits": {
+      "type": "object",
+      "properties": {
+        "cpu": { 
+          "type": "string", 
+          "pattern": "^[0-9]+(\\.[0-9]+)?[m]?$",
+          "description": "Millicores or cores (e.g., '500m', '2.5')"
+        },
+        "memory": { 
+          "type": "string", 
+          "pattern": "^[0-9]+(\\.[0-9]+)?(Ki|Mi|Gi|Ti|M|G|T)$",
+          "description": "Memory with SI/IEC suffix"
+        },
+        "ephemeral_storage": { 
+          "type": "string",
+          "pattern": "^[0-9]+(\\.[0-9]+)?(Gi|Mi)$"
+        }
+      },
+      "required": ["cpu", "memory"],
+      "additionalProperties": false
+    },
+    
+    "health_check": {
+      "type": "object",
+      "properties": {
+        "type": { 
+          "type": "string", 
+          "enum": ["http", "tcp", "grpc", "exec"] 
+        },
+        "endpoint": { 
+          "type": "string", 
+          "format": "uri-reference",
+          "description": "HTTP path or gRPC service name"
+        },
+        "port": { 
+          "type": "integer", 
+          "minimum": 1, 
+          "maximum": 65535 
+        },
+        "initial_delay_seconds": { 
+          "type": "integer", 
+          "minimum": 0, 
+          "default": 15 
+        },
+        "period_seconds": { 
+          "type": "integer", 
+          "minimum": 1, 
+          "maximum": 300, 
+          "default": 10 
+        },
+        "timeout_seconds": { 
+          "type": "integer", 
+          "minimum": 1, 
+          "maximum": 60, 
+          "default": 5 
+        },
+        "success_threshold": { 
+          "type": "integer", 
+          "minimum": 1, 
+          "maximum": 10, 
+          "default": 1 
+        },
+        "failure_threshold": { 
+          "type": "integer", 
+          "minimum": 1, 
+          "maximum": 30, 
+          "default": 3 
+        }
+      },
+      "required": ["type", "port"],
+      "allOf": [
+        {
+          "if": {
+            "properties": { "type": { "const": "http" } },
+            "required": ["type"]
+          },
+          "then": {
+            "required": ["endpoint"],
+            "properties": {
+              "endpoint": { "pattern": "^/.*" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "grpc" } },
+            "required": ["type"]
+          },
+          "then": {
+            "required": ["endpoint"],
+            "properties": {
+              "endpoint": { "pattern": "^[a-zA-Z][a-zA-Z0-9_.-]*\\.[a-zA-Z][a-zA-Z0-9_.-]*$" }
+            }
+          }
+        }
+      ]
+    }
+  },
+  
+  "properties": {
+    "release_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Globally unique release identifier"
+    },
+    
+    "version": {
+      "$ref": "#/definitions/semver",
+      "description": "Semantic version of the release"
+    },
+    
+    "artifact": {
+      "type": "object",
+      "properties": {
+        "registry": {
+          "type": "string",
+          "format": "hostname",
+          "examples": ["ghcr.io", "docker.io", "europe-west1-docker.pkg.dev"]
+        },
+        "repository": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*/[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+          "examples": ["myorg/backend-api", "team-auth/service"]
+        },
+        "tag": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$",
+          "examples": ["latest", "v1.2.3", "git-abc1234"]
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "description": "Content-addressable image digest"
+        },
+        "sbom_url": {
+          "type": "string",
+          "format": "uri",
+          "description": "Link to Software Bill of Materials"
+        }
+      },
+      "required": ["registry", "repository", "tag"],
+      "dependentRequired": {
+        "digest": ["sbom_url"],
+        "sbom_url": ["digest"]
+      },
+      "additionalProperties": false
+    },
+    
+    "environments": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": ["dev", "staging", "qa", "canary", "production"]
+      },
+      "uniqueItems": true,
+      "minItems": 1,
+      "description": "Target environments for this release"
+    },
+    
+    "deployment_strategy": {
+      "type": "string",
+      "enum": ["rolling", "blue-green", "canary", "recreate"],
+      "default": "rolling"
+    },
+    
+    "canary_config": {
+      "type": "object",
+      "properties": {
+        "steps": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "weight": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100
+              },
+              "duration_seconds": {
+                "type": "integer",
+                "minimum": 30,
+                "maximum": 86400
+              },
+              "metrics_check": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": { "type": "string" },
+                    "threshold": { "type": "number" },
+                    "comparison": { 
+                      "type": "string", 
+                      "enum": ["gt", "lt", "eq", "gte", "lte"] 
+                    }
+                  },
+                  "required": ["name", "threshold", "comparison"]
+                }
+              }
+            },
+            "required": ["weight"],
+            "additionalProperties": false
+          },
+          "minItems": 1,
+          "maxItems": 10
+        },
+        "traffic_mirroring": { 
+          "type": "boolean", 
+          "default": false 
+        }
+      },
+      "required": ["steps"]
+    },
+    
+    "rollback": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean", "default": true },
+        "auto_rollback": { 
+          "type": "boolean", 
+          "default": true 
+        },
+        "monitoring_window_seconds": {
+          "type": "integer",
+          "minimum": 60,
+          "maximum": 3600,
+          "default": 300
+        },
+        "failure_conditions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "metric": { "type": "string" },
+              "operator": { 
+                "type": "string", 
+                "enum": [">", "<", ">=", "<=", "=="] 
+              },
+              "value": { "type": "number" },
+              "for_duration_seconds": {
+                "type": "integer",
+                "minimum": 5
+              }
+            },
+            "required": ["metric", "operator", "value"]
+          },
+          "minItems": 1
+        },
+        "previous_version": {
+          "$ref": "#/definitions/semver",
+          "description": "Last known good version to revert to"
+        }
+      },
+      "required": ["enabled"]
+    },
+    
+    "scaling": {
+      "type": "object",
+      "properties": {
+        "min_replicas": { 
+          "type": "integer", 
+          "minimum": 0, 
+          "default": 2 
+        },
+        "max_replicas": { 
+          "type": "integer", 
+          "minimum": 1, 
+          "default": 10 
+        },
+        "target_cpu_utilization": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 70
+        },
+        "target_memory_utilization": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "behavior": {
+          "type": "object",
+          "properties": {
+            "scale_down": {
+              "type": "object",
+              "properties": {
+                "stabilization_window_seconds": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "default": 300
+                },
+                "policy": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "type": { 
+                        "type": "string", 
+                        "enum": ["Percent", "Pods"] 
+                      },
+                      "value": { 
+                        "type": "integer", 
+                        "minimum": 1 
+                      },
+                      "period_seconds": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 1800
+                      }
+                    },
+                    "required": ["type", "value", "period_seconds"]
+                  }
+                },
+                "select_policy": {
+                  "type": "string",
+                  "enum": ["Max", "Min", "Disabled"],
+                  "default": "Max"
+                }
+              }
+            },
+            "scale_up": {
+              "type": "object",
+              "properties": {
+                "stabilization_window_seconds": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "default": 0
+                },
+                "policy": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "type": { 
+                        "type": "string", 
+                        "enum": ["Percent", "Pods"] 
+                      },
+                      "value": { 
+                        "type": "integer", 
+                        "minimum": 1 
+                      },
+                      "period_seconds": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 1800
+                      }
+                    },
+                    "required": ["type", "value", "period_seconds"]
+                  }
+                },
+                "select_policy": {
+                  "type": "string",
+                  "enum": ["Max", "Min", "Disabled"],
+                  "default": "Max"
+                }
+              }
+            }
+          }
+        }
+      },
+      "required": ["min_replicas", "max_replicas"],
+      "if": {
+        "properties": { "max_replicas": { "const": 0 } }
+      },
+      "then": {
+        "properties": { "min_replicas": { "const": 0 } }
+      },
+      "else": {
+        "properties": { 
+          "min_replicas": { 
+            "exclusiveMaximum": { "$data": "1/max_replicas" }
+          } 
+        }
+      }
+    },
+    
+    "resources": {
+      "$ref": "#/definitions/resource_limits",
+      "description": "Container resource requests and limits"
+    },
+    
+    "health": {
+      "$ref": "#/definitions/health_check",
+      "description": "Readiness and liveness probe configuration"
+    },
+    
+    "config_maps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": { 
+            "type": "string", 
+            "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" 
+          },
+          "mount_path": { 
+            "type": "string", 
+            "pattern": "^/([a-zA-Z0-9._-]+/?)+$" 
+          },
+          "data": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "minProperties": 1
+          }
+        },
+        "required": ["name", "mount_path"],
+        "additionalProperties": false
+      },
+      "uniqueItems": true
+    },
+    
+    "secrets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": { 
+            "type": "string", 
+            "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" 
+          },
+          "env_vars": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Z_][A-Z0-9_]*$"
+            },
+            "uniqueItems": true,
+            "minItems": 1
+          },
+          "secret_store": {
+            "type": "string",
+            "enum": ["vault", "aws-secretsmanager", "gcp-secretmanager", "azure-keyvault"]
+          },
+          "key_ref": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9/._-]+$"
+          }
+        },
+        "required": ["name", "env_vars", "secret_store", "key_ref"],
+        "additionalProperties": false
+      },
+      "uniqueItems": true
+    },
+    
+    "annotations": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 1024
+      },
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9./-]*$",
+        "maxLength": 63
+      }
+    },
+    
+    "labels": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[a-zA-Z0-9]([a-zA-Z0-9_.-]*[a-zA-Z0-9])?$",
+        "maxLength": 63
+      },
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9./-]*$",
+        "maxLength": 63
+      },
+      "required": ["app", "environment"]
+    },
+    
+    "maintenance_window": {
+      "type": "object",
+      "properties": {
+        "start_time": {
+          "type": "string",
+          "format": "time",
+          "pattern": "^([01]\\d|2[0-3]):([0-5]\\d):([0-5]\\d)$"
+        },
+        "end_time": {
+          "type": "string",
+          "format": "time",
+          "pattern": "^([01]\\d|2[0-3]):([0-5]\\d):([0-5]\\d)$"
+        },
+        "timezone": {
+          "type": "string",
+          "enum": ["UTC", "America/New_York", "Europe/London", "Asia/Tokyo", "Australia/Sydney"]
+        },
+        "days_of_week": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+          },
+          "uniqueItems": true,
+          "minItems": 1
+        }
+      },
+      "required": ["start_time", "end_time", "timezone"],
+      "if": {
+        "properties": { 
+          "start_time": { "type": "string" },
+          "end_time": { "type": "string" }
+        }
+      },
+      "then": {
+        "description": "End time must be after start time (validated externally)"
+      }
+    },
+    
+    "signatures": {
+      "type": "object",
+      "properties": {
+        "git_commit_sha": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{7,40}$"
+        },
+        "release_author": {
+          "type": "string",
+          "format": "email"
+        },
+        "pgp_signature": {
+          "type": "string",
+          "pattern": "^-----BEGIN PGP SIGNATURE-----.*-----END PGP SIGNATURE-----$",
+          "description": "PGP-armored signature"
+        },
+        "approved_by": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string" },
+              "role": { 
+                "type": "string", 
+                "enum": ["lead", "security", "qa", "sre"] 
+              },
+              "timestamp": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": ["name", "role"]
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        }
+      },
+      "required": ["git_commit_sha", "release_author"]
+    },
+    
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 UTC timestamp"
+    },
+    
+    "expires_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Release expiration for ephemeral environments"
+    }
+  },
+  
+  "required": [
+    "release_id",
+    "version",
+    "artifact",
+    "environments",
+    "labels",
+    "signatures",
+    "created_at"
+  ],
+  
+  "dependentSchemas": {
+    "canary_config": {
+      "if": {
+        "properties": { "deployment_strategy": { "const": "canary" } },
+        "required": ["deployment_strategy"]
+      },
+      "then": {
+        "required": ["canary_config"]
+      }
+    },
+    "rollback": {
+      "if": {
+        "properties": { "environments": { 
+          "contains": { "const": "production" } 
+        } },
+        "required": ["environments"]
+      },
+      "then": {
+        "required": ["rollback"],
+        "properties": {
+          "rollback": {
+            "required": ["auto_rollback", "failure_conditions"]
+          }
+        }
+      }
+    }
+  },
+  
+  "allOf": [
+    {
+      "if": {
+        "properties": { 
+          "deployment_strategy": { 
+            "const": "blue-green" 
+          } 
+        },
+        "required": ["deployment_strategy"]
+      },
+      "then": {
+        "properties": {
+          "scaling": {
+            "properties": {
+              "min_replicas": { "minimum": 2 },
+              "max_replicas": { "minimum": 4 }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { 
+          "environments": {
+            "contains": { "const": "production" }
+          }
+        },
+        "required": ["environments"]
+      },
+      "then": {
+        "properties": {
+          "artifact": {
+            "required": ["digest"],
+            "properties": {
+              "tag": { "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+$" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { 
+          "expires_at": { "type": "string" } 
+        }
+      },
+      "then": {
+        "properties": {
+          "created_at": { 
+            "format": "date-time"
+          }
+        },
+        "description": "expires_at must be > created_at (validated externally)"
+      }
+    }
+  ],
+  
+  "not": {
+    "properties": {
+      "deployment_strategy": { "const": "recreate" },
+      "scaling": {
+        "properties": {
+          "min_replicas": { "exclusiveMinimum": 1 }
+        }
+      }
+    },
+    "description": "Recreate strategy cannot have more than 1 replica"
+  },
+  
+  "examples": [
+    {
+      "release_id": "550e8400-e29b-41d4-a716-446655440000",
+      "version": "v2.3.1",
+      "artifact": {
+        "registry": "ghcr.io",
+        "repository": "myorg/auth-service",
+        "tag": "v2.3.1",
+        "digest": "sha256:a1b2c3d4e5f6789012345678901234567890123456789012345678901234",
+        "sbom_url": "https://storage.corp.com/sbom/auth-service-v2.3.1.json"
+      },
+      "environments": ["staging", "canary", "production"],
+      "deployment_strategy": "canary",
+      "canary_config": {
+        "steps": [
+          { "weight": 5, "duration_seconds": 300 },
+          { "weight": 25, "duration_seconds": 600, "metrics_check": [
+            { "name": "error_rate", "threshold": 1.5, "comparison": "lt" }
+          ] },
+          { "weight": 100, "duration_seconds": 900 }
+        ],
+        "traffic_mirroring": true
+      },
+      "rollback": {
+        "enabled": true,
+        "auto_rollback": true,
+        "monitoring_window_seconds": 600,
+        "failure_conditions": [
+          { "metric": "http_5xx_percent", "operator": ">", "value": 5.0, "for_duration_seconds": 30 }
+        ],
+        "previous_version": "v2.3.0"
+      },
+      "scaling": {
+        "min_replicas": 3,
+        "max_replicas": 15,
+        "target_cpu_utilization": 65,
+        "target_memory_utilization": 75,
+        "behavior": {
+          "scale_up": {
+            "stabilization_window_seconds": 60,
+            "policy": [
+              { "type": "Pods", "value": 2, "period_seconds": 60 },
+              { "type": "Percent", "value": 50, "period_seconds": 60 }
+            ],
+            "select_policy": "Max"
+          }
+        }
+      },
+      "resources": {
+        "cpu": "1000m",
+        "memory": "2Gi",
+        "ephemeral_storage": "10Gi"
+      },
+      "health": {
+        "type": "http",
+        "endpoint": "/healthz",
+        "port": 8080,
+        "initial_delay_seconds": 30,
+        "period_seconds": 10,
+        "failure_threshold": 5
+      },
+      "config_maps": [
+        {
+          "name": "app-config",
+          "mount_path": "/etc/app",
+          "data": {
+            "log_level": "info",
+            "cache_ttl": "300"
+          }
+        }
+      ],
+      "secrets": [
+        {
+          "name": "db-credentials",
+          "env_vars": ["DB_USER", "DB_PASSWORD"],
+          "secret_store": "vault",
+          "key_ref": "secret/database/prod"
+        }
+      ],
+      "labels": {
+        "app": "auth-service",
+        "environment": "production",
+        "team": "identity",
+        "version": "v2.3.1"
+      },
+      "annotations": {
+        "monitoring.corp.com/dashboard": "/d/auth-service",
+        "oncall.corp.com/pagerduty": "P12345"
+      },
+      "signatures": {
+        "git_commit_sha": "a1b2c3d4e5f6",
+        "release_author": "devops@corp.com",
+        "pgp_signature": "-----BEGIN PGP SIGNATURE-----\nVersion: GnuPG v1\n\niQEcBAABAgAGBQJ...\n-----END PGP SIGNATURE-----",
+        "approved_by": [
+          { "name": "Alice", "role": "lead", "timestamp": "2026-07-16T10:30:00Z" },
+          { "name": "Bob", "role": "security", "timestamp": "2026-07-16T10:45:00Z" }
+        ]
+      },
+      "created_at": "2026-01-10T10:00:00Z"
+    }
+  ]
+}
