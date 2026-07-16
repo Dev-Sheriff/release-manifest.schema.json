@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://internal.corp.com/schemas/release-manifest.v2.json",
+  "$id": "https://github.com/Dev-Sheriff/release-manifest.schema.json.git",
   "title": "Software Release Manifest",
   "description": "Comprehensive deployment specification for microservices with canary, blue/green, and rollback strategies",
   "type": "object",
